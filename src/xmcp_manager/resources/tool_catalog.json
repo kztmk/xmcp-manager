@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "source": "bundled",
+  "generatedAt": "2026-06-24T00:00:00Z",
+  "xmcpRevision": "63d34362d88ed9f94d54ccd5ecd5bb4d12e11759",
+  "tools": [
+    {
+      "name": "getUsersMe",
+      "category": "Profile",
+      "actionType": "profile",
+      "riskLevel": "read",
+      "description": "Get the authenticated X user profile."
+    },
+    {
+      "name": "getUsersByUsername",
+      "category": "Profile",
+      "actionType": "profile",
+      "riskLevel": "read",
+      "description": "Get an X user by username."
+    },
+    {
+      "name": "createPosts",
+      "category": "Posts",
+      "actionType": "post",
+      "riskLevel": "write",
+      "description": "Create a post."
+    },
+    {
+      "name": "deletePosts",
+      "category": "Posts",
+      "actionType": "post",
+      "riskLevel": "destructive",
+      "description": "Delete a post."
+    },
+    {
+      "name": "createDirectMessages",
+      "category": "Direct Messages",
+      "actionType": "dm",
+      "riskLevel": "sensitive",
+      "description": "Create a direct message."
+    }
+  ]
+}
