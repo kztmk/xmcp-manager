@@ -1,0 +1,64 @@
+[project]
+name = "xmcp-manager"
+version = "0.1.0"
+description = "Desktop manager for running xmcp with X accounts and MCP clients."
+requires-python = ">=3.11"
+dependencies = [
+  "customtkinter>=5.2.0",
+  "fastmcp",
+  "httpx",
+  "keyring>=24.0.0",
+  "oauthlib>=3.2.2",
+  "platformdirs>=4.0.0",
+  "python-dotenv",
+  "requests>=2.31.0",
+  "requests-oauthlib",
+  "tomlkit>=0.12.0",
+  "xai-sdk",
+  "xdk",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy",
+  "pyinstaller",
+  "pytest",
+  "ruff",
+]
+
+[project.scripts]
+xmcp-manager = "xmcp_manager.main:main"
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+xmcp_manager = [
+  "resources/*.json",
+  "xmcp/server.py",
+  "xmcp/VENDORED_XMCP_REVISION",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["src/xmcp_manager/xmcp/server.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src/xmcp_manager", "scripts"]
+exclude = ["src/xmcp_manager/xmcp/"]
+ignore_missing_imports = true
+disable_error_code = ["misc"]

@@ -596,6 +596,7 @@ GUI は CustomTkinter で実装する。
 │   └── xmcp_manager/
 │       ├── __init__.py
 │       ├── main.py
+│       ├── app_settings.py
 │       ├── server_manager.py
 │       ├── account_store.py
 │       ├── client_config.py
@@ -620,6 +621,7 @@ GUI は CustomTkinter で実装する。
 | ファイル | 責務 |
 |---|---|
 | `main.py` | GUI 起動、画面構成、ユーザー操作の結線 |
+| `app_settings.py` | App Settings の読み書き、Store validation 状態の保存 |
 | `server_manager.py` | `xmcp` プロセス管理、Server State 更新 |
 | `account_store.py` | Account Metadata と API Credentials の保存・取得 |
 | `client_config.py` | Claude Desktop / Codex Desktop 設定の読み書き |
@@ -644,6 +646,12 @@ Tool Catalog の `xmcpRevision` は `VENDORED_XMCP_REVISION` と一致しなけ�
 - `get_backup_dir(client_id: str) -> Path`
 - `get_bundled_resource_path(name: str) -> Path`
 - `open_folder(path: Path) -> None`
+
+`app_settings.py`:
+
+- `load_app_settings() -> AppSettings`
+- `save_app_settings(settings: AppSettings) -> None`
+- `mark_store_validation_current(settings: AppSettings) -> AppSettings`
 
 `account_store.py`:
 
