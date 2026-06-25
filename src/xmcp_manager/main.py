@@ -12,6 +12,7 @@ from xmcp_manager.account_store import (
     delete_account,
     get_credentials_status,
     load_accounts,
+    load_credentials_for_start,
     save_accounts,
     save_credentials,
 )
@@ -26,9 +27,14 @@ from xmcp_manager.models import (
     CredentialStatus,
     McpClientId,
     ServerStateSnapshot,
+    utc_now_iso,
 )
 from xmcp_manager.server_manager import ServerManager
-from xmcp_manager.tool_allowlist import load_tool_catalog
+from xmcp_manager.tool_allowlist import (
+    generate_allowlist,
+    load_tool_catalog,
+    requires_warning,
+)
 
 
 class XMCPManagerApp(ctk.CTk):
@@ -385,11 +391,99 @@ class XMCPManagerApp(ctk.CTk):
 
     def _build_server_tab(self) -> None:
         tab = self.tabs.tab("Server")
-        ctk.CTkButton(tab, text="Stop server", command=self.server_manager.stop).pack(
-            anchor="w", padx=12, pady=8
+        controls = ctk.CTkFrame(tab)
+        controls.pack(fill="x", padx=12, pady=8)
+        controls.grid_columnconfigure(0, weight=1)
+        controls.grid_columnconfigure(1, weight=1)
+        self.server_message = ctk.CTkLabel(controls, text="Select an account and start xmcp.")
+        self.server_message.grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=8)
+        ctk.CTkButton(controls, text="Start server", command=self._start_server).grid(
+            row=1, column=0, sticky="ew", padx=12, pady=(0, 12)
+        )
+        ctk.CTkButton(controls, text="Stop server", command=self._stop_server).grid(
+            row=1, column=1, sticky="ew", padx=12, pady=(0, 12)
         )
         self.log_box = ctk.CTkTextbox(tab)
         self.log_box.pack(fill="both", expand=True, padx=12, pady=8)
+
+    def _start_server(self) -> None:
+        account = self._selected_account()
+        if account is None:
+            messagebox.showwarning("Server", "Select an account first.")
+            return
+        account.credential_status = get_credentials_status(account.id)
+        if account.credential_status is not CredentialStatus.OK:
+            messagebox.showwarning(
+                "Server",
+                f"Credentials are {account.credential_status.value}. Save valid credentials first.",
+            )
+            self._load_selected_account_into_form()
+            return
+        try:
+            credentials = load_credentials_for_start(account.id)
+        except StoreError as exc:
+            messagebox.showerror("Server", str(exc))
+            self._refresh_accounts()
+            return
+        allowlist = generate_allowlist(
+            account.tool_allowlist_preset,
+            account.tool_allowlist,
+            self.catalog,
+        )
+        if not allowlist.validation.ok:
+            messagebox.showwarning(
+                "Server",
+                "Custom tool allowlist contains invalid tools: "
+                + ", ".join(allowlist.validation.invalid_tools),
+            )
+            return
+        warnings = requires_warning(
+            account.tool_allowlist_preset,
+            account.tool_allowlist,
+            self.catalog,
+        )
+        if warnings.full_access and not self.settings.full_access_warning_accepted:
+            if not messagebox.askyesno(
+                "Tool Allowlist",
+                "Full access exposes every xmcp tool. Continue?",
+            ):
+                return
+            self.settings.full_access_warning_accepted = True
+            save_app_settings(self.settings)
+        if warnings.broad_write and not self.settings.broad_write_preset_warning_accepted:
+            if not messagebox.askyesno(
+                "Tool Allowlist",
+                (
+                    "Broad write access can post, delete, send DMs, "
+                    "and perform other X operations. Continue?"
+                ),
+            ):
+                return
+            self.settings.broad_write_preset_warning_accepted = True
+            save_app_settings(self.settings)
+        if warnings.unknown_custom_tools:
+            if not messagebox.askyesno(
+                "Tool Allowlist",
+                "Custom allowlist includes uncategorized tools: "
+                + ", ".join(warnings.unknown_custom_tools)
+                + ". Continue?",
+            ):
+                return
+        account.last_used_at = utc_now_iso()
+        save_accounts(self.accounts_doc)
+        result = self.server_manager.start(
+            account,
+            credentials,
+            allowlist.env_value,
+            self.settings,
+        )
+        if not result.ok:
+            messagebox.showwarning("Server", result.message)
+        self.server_message.configure(text=result.message)
+
+    def _stop_server(self) -> None:
+        result = self.server_manager.stop()
+        self.server_message.configure(text=result.message)
 
     def _build_settings_tab(self) -> None:
         tab = self.tabs.tab("Settings")
