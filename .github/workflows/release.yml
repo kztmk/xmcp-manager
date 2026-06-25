@@ -1,0 +1,221 @@
+name: Release Candidate
+
+on:
+  push:
+    branches:
+      - release
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    name: Validate source
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+
+      - name: Check version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="$(python scripts/check_version.py --tag "${GITHUB_REF_NAME}")"
+          else
+            VERSION="$(python scripts/check_version.py)"
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Check vendored tool catalog revision
+        run: python scripts/check_tool_catalog_revision.py
+
+      - name: Ruff
+        run: python -m ruff check .
+
+      - name: Mypy
+        run: python -m mypy src/xmcp_manager scripts
+
+      - name: Pytest
+        run: python -m pytest
+
+  macos:
+    name: macOS release candidate
+    needs: validate
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+
+      - name: Build app
+        run: python -m PyInstaller packaging/pyinstaller/xmcp-manager.spec --noconfirm --clean
+
+      - name: Smoke app bundle
+        run: python scripts/smoke_artifact.py "dist/XMCP Manager.app" --platform macos
+
+      - name: Require signing secrets
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_DEVELOPER_ID_APPLICATION: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          test -n "${APPLE_CERTIFICATE_BASE64}"
+          test -n "${APPLE_CERTIFICATE_PASSWORD}"
+          test -n "${APPLE_DEVELOPER_ID_APPLICATION}"
+          test -n "${APPLE_ID}"
+          test -n "${APPLE_TEAM_ID}"
+          test -n "${APPLE_APP_SPECIFIC_PASSWORD}"
+
+      - name: Import Apple signing certificate
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          CERTIFICATE_PATH="${RUNNER_TEMP}/developer-id.p12"
+          KEYCHAIN_PATH="${RUNNER_TEMP}/app-signing.keychain-db"
+          echo "${APPLE_CERTIFICATE_BASE64}" | base64 --decode > "${CERTIFICATE_PATH}"
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security import "${CERTIFICATE_PATH}" \
+            -P "${APPLE_CERTIFICATE_PASSWORD}" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "${KEYCHAIN_PATH}"
+          security list-keychain -d user -s "${KEYCHAIN_PATH}"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+
+      - name: Configure notarization profile
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials "xmcp-manager-notary" \
+            --apple-id "${APPLE_ID}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --password "${APPLE_APP_SPECIFIC_PASSWORD}"
+
+      - name: Sign app
+        run: |
+          codesign --force --deep --options runtime \
+            --sign "${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}" \
+            "dist/XMCP Manager.app"
+
+      - name: Create DMG
+        run: |
+          hdiutil create \
+            -volname "XMCP Manager" \
+            -srcfolder "dist/XMCP Manager.app" \
+            -ov \
+            -format UDZO \
+            "dist/XMCP-Manager-${{ needs.validate.outputs.version }}-macos.dmg"
+
+      - name: Notarize DMG
+        run: |
+          xcrun notarytool submit \
+            "dist/XMCP-Manager-${{ needs.validate.outputs.version }}-macos.dmg" \
+            --keychain-profile "xmcp-manager-notary" \
+            --wait
+          xcrun stapler staple "dist/XMCP-Manager-${{ needs.validate.outputs.version }}-macos.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xmcp-manager-macos
+          path: dist/XMCP-Manager-${{ needs.validate.outputs.version }}-macos.dmg
+          retention-days: 14
+
+  windows:
+    name: Windows MSIX release candidate
+    needs: validate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+
+      - name: Build app
+        run: python -m PyInstaller packaging/pyinstaller/xmcp-manager.spec --noconfirm --clean
+
+      - name: Smoke app directory
+        run: python scripts/smoke_artifact.py "dist/XMCP Manager" --platform windows
+
+      - name: Prepare MSIX layout
+        shell: pwsh
+        env:
+          XMCP_MSIX_PUBLISHER: ${{ secrets.XMCP_MSIX_PUBLISHER }}
+        run: |
+          $publisher = if ($env:XMCP_MSIX_PUBLISHER) { $env:XMCP_MSIX_PUBLISHER } else { "CN=XMCP Manager" }
+          python scripts/prepare_msix_layout.py --publisher "$publisher"
+          python scripts/create_windows_assets.py --output-dir "build/msix/Assets"
+
+      - name: Package MSIX
+        shell: pwsh
+        run: |
+          $makeAppx = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter MakeAppx.exe |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $makeAppx) { throw "MakeAppx.exe was not found." }
+          & $makeAppx.FullName pack /d "build/msix" /p "dist/XMCP-Manager-${{ needs.validate.outputs.version }}-windows.msix" /o
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xmcp-manager-windows-msix
+          path: dist/XMCP-Manager-${{ needs.validate.outputs.version }}-windows.msix
+          retention-days: 14
+
+  draft-release:
+    name: Draft GitHub release
+    needs:
+      - validate
+      - macos
+      - windows
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: xmcp-manager-macos
+          path: artifacts
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            artifacts/*.dmg \
+            --draft \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Draft release for XMCP Manager ${GITHUB_REF_NAME}."
