@@ -4,7 +4,7 @@
 
 - Feature work lands in `feature/*`.
 - Verified feature branches merge into `develop`.
-- After real-device verification, `develop` merges into `main`.
+- After real-device verification using `docs/smoke-checklist.md`, `develop` merges into `main`.
 - Release candidate builds are produced from the `release` branch.
 - Draft GitHub releases are produced from `v*` tags after the tag matches `pyproject.toml`.
 
