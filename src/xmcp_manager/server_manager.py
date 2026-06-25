@@ -35,6 +35,7 @@ class ServerManager:
         self._listeners: list[StateListener] = []
         self._log_queue: queue.Queue[str] = queue.Queue()
         self._startup_timeout_sec = 300
+        self._run_id = 0
 
     def subscribe(self, listener: StateListener) -> Callable[[], None]:
         self._listeners.append(listener)
@@ -79,6 +80,8 @@ class ServerManager:
         if unmanaged.detected and self._process is None:
             return StartResult(ok=False, message=unmanaged.message)
         self.stop()
+        self._run_id += 1
+        run_id = self._run_id
         env = os.environ.copy()
         env.update(
             {
@@ -112,14 +115,21 @@ class ServerManager:
         threading.Thread(target=self._read_output, args=(self._process,), daemon=True).start()
         threading.Thread(
             target=self._watch_startup,
-            args=(self._process, app_settings.endpoint_url),
+            args=(self._process, app_settings.endpoint_url, run_id),
             daemon=True,
         ).start()
         return StartResult(ok=True, message="xmcp server starting.")
 
-    def _watch_startup(self, process: subprocess.Popen[str], endpoint_url: str) -> None:
+    def _watch_startup(
+        self,
+        process: subprocess.Popen[str],
+        endpoint_url: str,
+        run_id: int,
+    ) -> None:
         started_at = time.time()
         while process.poll() is None and time.time() - started_at < self._startup_timeout_sec:
+            if run_id != self._run_id or process is not self._process:
+                return
             while not self._log_queue.empty():
                 line = self._log_queue.get_nowait()
                 if "Opening browser for OAuth1 consent" in line or "OAuth" in line:
@@ -128,8 +138,16 @@ class ServerManager:
                 self._set_state(ServerState.CONNECTABLE, "xmcp server is connectable.")
                 return
             time.sleep(1)
+        if run_id != self._run_id or process is not self._process:
+            return
         if process.poll() is None:
-            self._set_state(ServerState.ERROR, "Startup timed out before MCP initialize succeeded.")
+            self._set_state(
+                ServerState.ERROR,
+                (
+                    "Startup timed out. Check OAuth completion, callback URL, network access, "
+                    "OpenAPI fetch, and port conflicts."
+                ),
+            )
         else:
             self._set_state(ServerState.ERROR, f"xmcp exited with code {process.returncode}.")
 
@@ -160,6 +178,7 @@ class ServerManager:
             except subprocess.TimeoutExpired:
                 self._process.kill()
                 self._process.wait(timeout=5)
+        self._run_id += 1
         self._process = None
         self._state.account_id = None
         self._state.account_label = None
@@ -170,8 +189,18 @@ class ServerManager:
         if self._process and self._process.poll() is None:
             return UnmanagedServerStatus(detected=False, endpoint_url=endpoint)
         try:
-            response = httpx.get(endpoint, timeout=1)
-            if response.status_code < 500:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "xmcp-manager-detect", "version": "0.1.0"},
+                },
+            }
+            response = httpx.post(endpoint, json=payload, timeout=1)
+            if response.status_code < 500 and "jsonrpc" in response.text:
                 return UnmanagedServerStatus(
                     detected=True,
                     endpoint_url=endpoint,
