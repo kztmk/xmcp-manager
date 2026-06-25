@@ -27,6 +27,7 @@ from xmcp_manager.models import (
     CredentialStatus,
     McpClientId,
     ServerStateSnapshot,
+    ToolPreset,
     utc_now_iso,
 )
 from xmcp_manager.server_manager import ServerManager
@@ -104,6 +105,7 @@ class XMCPManagerApp(ctk.CTk):
         else:
             self.selected_account_id = None
         self._load_selected_account_into_form()
+        self._load_selected_account_into_tools_form()
 
     def _add_account(self) -> None:
         base = "new-account"
@@ -140,6 +142,7 @@ class XMCPManagerApp(ctk.CTk):
             return
         self.selected_account_id = self.accounts_doc.accounts[index].id
         self._load_selected_account_into_form()
+        self._load_selected_account_into_tools_form()
 
     def _build_account_tab(self) -> None:
         tab = self.tabs.tab("Account")
@@ -335,10 +338,193 @@ class XMCPManagerApp(ctk.CTk):
 
     def _build_tools_tab(self) -> None:
         tab = self.tabs.tab("Tools")
-        ctk.CTkLabel(tab, text=f"Tool Catalog: {len(self.catalog.tools)} tools loaded").pack(
-            anchor="w", padx=12, pady=12
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_columnconfigure(1, weight=1)
+        tab.grid_rowconfigure(1, weight=1)
+
+        summary = ctk.CTkFrame(tab)
+        summary.grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=12)
+        summary.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(summary, text="Preset").grid(row=0, column=0, sticky="w", padx=12, pady=12)
+        self.tool_preset_var = tk.StringVar(value=ToolPreset.BROAD_WRITE.value)
+        self.tool_preset_control = ctk.CTkSegmentedButton(
+            summary,
+            values=[
+                ToolPreset.READ_ONLY.value,
+                ToolPreset.BROAD_WRITE.value,
+                ToolPreset.FULL_ACCESS.value,
+                ToolPreset.CUSTOM.value,
+            ],
+            variable=self.tool_preset_var,
+            command=lambda _value: self._preview_tool_allowlist(),
         )
-        ctk.CTkLabel(tab, text="Default preset: 広範な書き込み操作").pack(anchor="w", padx=12)
+        self.tool_preset_control.grid(row=0, column=1, sticky="ew", padx=12, pady=12)
+
+        catalog_frame = ctk.CTkFrame(tab)
+        catalog_frame.grid(row=1, column=0, sticky="nsew", padx=(12, 6), pady=(0, 12))
+        catalog_frame.grid_rowconfigure(1, weight=1)
+        catalog_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            catalog_frame,
+            text=f"Tool Catalog: {len(self.catalog.tools)} tools loaded",
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=12)
+        self.tool_catalog_box = ctk.CTkTextbox(catalog_frame, height=260)
+        self.tool_catalog_box.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        self._populate_tool_catalog_box()
+
+        custom_frame = ctk.CTkFrame(tab)
+        custom_frame.grid(row=1, column=1, sticky="nsew", padx=(6, 12), pady=(0, 12))
+        custom_frame.grid_rowconfigure(1, weight=1)
+        custom_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(custom_frame, text="Custom allowlist").grid(
+            row=0, column=0, sticky="w", padx=12, pady=12
+        )
+        self.custom_tools_box = ctk.CTkTextbox(custom_frame, height=180)
+        self.custom_tools_box.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
+        self.tool_preview_label = ctk.CTkLabel(
+            custom_frame,
+            text="",
+            justify="left",
+            wraplength=360,
+        )
+        self.tool_preview_label.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 8))
+        ctk.CTkButton(
+            custom_frame,
+            text="Save Tool Settings",
+            command=self._save_tool_settings,
+        ).grid(
+            row=3,
+            column=0,
+            sticky="ew",
+            padx=12,
+            pady=(0, 12),
+        )
+
+    def _populate_tool_catalog_box(self) -> None:
+        if not hasattr(self, "tool_catalog_box"):
+            return
+        self.tool_catalog_box.configure(state="normal")
+        self.tool_catalog_box.delete("1.0", tk.END)
+        rows = [
+            f"{tool.name}  [{tool.risk_level.value}]  {tool.category}"
+            for tool in self.catalog.tools
+        ]
+        self.tool_catalog_box.insert("1.0", "\n".join(rows))
+        self.tool_catalog_box.configure(state="disabled")
+
+    def _parse_custom_tools(self) -> list[str]:
+        if not hasattr(self, "custom_tools_box"):
+            return []
+        raw = self.custom_tools_box.get("1.0", tk.END)
+        normalized = raw.replace(",", "\n")
+        return [line.strip() for line in normalized.splitlines() if line.strip()]
+
+    def _set_tools_form_enabled(self, enabled: bool) -> None:
+        if not hasattr(self, "tool_preset_control"):
+            return
+        state = "normal" if enabled else "disabled"
+        self.tool_preset_control.configure(state=state)
+        self.custom_tools_box.configure(state=state)
+
+    def _load_selected_account_into_tools_form(self) -> None:
+        if not hasattr(self, "tool_preset_var"):
+            return
+        account = self._selected_account()
+        if account is None:
+            self.tool_preset_var.set(ToolPreset.BROAD_WRITE.value)
+            self.custom_tools_box.configure(state="normal")
+            self.custom_tools_box.delete("1.0", tk.END)
+            self.custom_tools_box.configure(state="disabled")
+            self.tool_preview_label.configure(text="Add an account to configure tool access.")
+            self._set_tools_form_enabled(False)
+            return
+        self.tool_preset_var.set(account.tool_allowlist_preset.value)
+        self.custom_tools_box.configure(state="normal")
+        self.custom_tools_box.delete("1.0", tk.END)
+        self.custom_tools_box.insert("1.0", "\n".join(account.tool_allowlist))
+        self._set_tools_form_enabled(True)
+        self._preview_tool_allowlist()
+
+    def _preview_tool_allowlist(self) -> None:
+        if not hasattr(self, "tool_preview_label"):
+            return
+        account = self._selected_account()
+        if account is None:
+            self.tool_preview_label.configure(text="Add an account to configure tool access.")
+            return
+        try:
+            preset = ToolPreset(self.tool_preset_var.get())
+        except ValueError:
+            self.tool_preview_label.configure(text="Invalid preset.")
+            return
+        custom_tools = self._parse_custom_tools()
+        allowlist = generate_allowlist(preset, custom_tools, self.catalog)
+        warnings = requires_warning(preset, custom_tools, self.catalog)
+        lines = []
+        if preset is ToolPreset.FULL_ACCESS:
+            lines.append("Full access: no X_API_TOOL_ALLOWLIST will be set.")
+        else:
+            lines.append(f"{len(allowlist.tools)} tools will be allowed.")
+        if not allowlist.validation.ok:
+            lines.append("Invalid tools: " + ", ".join(allowlist.validation.invalid_tools))
+        if warnings.broad_write:
+            lines.append("Warning: broad write access includes write/destructive/sensitive tools.")
+        if warnings.full_access:
+            lines.append("Warning: full access exposes every xmcp tool.")
+        if warnings.unknown_custom_tools:
+            lines.append("Unknown risk tools: " + ", ".join(warnings.unknown_custom_tools))
+        self.tool_preview_label.configure(text="\n".join(lines))
+
+    def _save_tool_settings(self) -> None:
+        account = self._selected_account()
+        if account is None:
+            messagebox.showwarning("Tools", "Select an account first.")
+            return
+        try:
+            preset = ToolPreset(self.tool_preset_var.get())
+        except ValueError:
+            messagebox.showwarning("Tools", "Select a valid preset.")
+            return
+        custom_tools = self._parse_custom_tools()
+        allowlist = generate_allowlist(preset, custom_tools, self.catalog)
+        if not allowlist.validation.ok:
+            messagebox.showwarning(
+                "Tools",
+                "Custom allowlist contains invalid tools: "
+                + ", ".join(allowlist.validation.invalid_tools),
+            )
+            self._preview_tool_allowlist()
+            return
+        warnings = requires_warning(preset, custom_tools, self.catalog)
+        if warnings.full_access and not self.settings.full_access_warning_accepted:
+            if not messagebox.askyesno("Tools", "Full access exposes every xmcp tool. Save?"):
+                return
+            self.settings.full_access_warning_accepted = True
+            save_app_settings(self.settings)
+        if warnings.broad_write and not self.settings.broad_write_preset_warning_accepted:
+            if not messagebox.askyesno(
+                "Tools",
+                (
+                    "Broad write access can post, delete, send DMs, "
+                    "and perform other X operations. Save?"
+                ),
+            ):
+                return
+            self.settings.broad_write_preset_warning_accepted = True
+            save_app_settings(self.settings)
+        if warnings.unknown_custom_tools:
+            if not messagebox.askyesno(
+                "Tools",
+                "Custom allowlist includes uncategorized tools: "
+                + ", ".join(warnings.unknown_custom_tools)
+                + ". Save?",
+            ):
+                return
+        account.tool_allowlist_preset = preset
+        account.tool_allowlist = list(dict.fromkeys(custom_tools))
+        save_accounts(self.accounts_doc)
+        self._preview_tool_allowlist()
+        messagebox.showinfo("Tools", "Tool settings saved.")
 
     def _build_clients_tab(self) -> None:
         tab = self.tabs.tab("Clients")
