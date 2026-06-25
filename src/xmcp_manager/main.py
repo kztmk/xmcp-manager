@@ -5,13 +5,28 @@ from tkinter import messagebox
 
 import customtkinter as ctk
 
-from xmcp_manager.account_store import create_account, load_accounts, save_accounts
+from xmcp_manager.account_store import (
+    SaveMode,
+    StoreError,
+    create_account,
+    delete_account,
+    get_credentials_status,
+    load_accounts,
+    save_accounts,
+    save_credentials,
+)
 from xmcp_manager.app_settings import AppSettingsError, load_app_settings, save_app_settings
 from xmcp_manager.client_config import (
     manual_snippet,
     update_selected_clients,
 )
-from xmcp_manager.models import AppSettings, McpClientId, ServerStateSnapshot
+from xmcp_manager.models import (
+    Account,
+    AppSettings,
+    CredentialStatus,
+    McpClientId,
+    ServerStateSnapshot,
+)
 from xmcp_manager.server_manager import ServerManager
 from xmcp_manager.tool_allowlist import load_tool_catalog
 
@@ -30,6 +45,7 @@ class XMCPManagerApp(ctk.CTk):
             messagebox.showerror("Recovery required", str(exc))
         self.accounts_doc = load_accounts()
         self.catalog = load_tool_catalog()
+        self.selected_account_id: str | None = None
         self._build_ui()
         self.server_manager.subscribe(self._on_server_state)
 
@@ -51,7 +67,7 @@ class XMCPManagerApp(ctk.CTk):
         )
         self.account_list = tk.Listbox(self.account_frame, width=28)
         self.account_list.grid(row=1, column=0, sticky="nsew", padx=12, pady=8)
-        self._refresh_accounts()
+        self.account_list.bind("<<ListboxSelect>>", self._on_account_selected)
         ctk.CTkButton(self.account_frame, text="+ Add", command=self._add_account).grid(
             row=2, column=0, sticky="ew", padx=12, pady=8
         )
@@ -65,28 +81,251 @@ class XMCPManagerApp(ctk.CTk):
         self._build_clients_tab()
         self._build_server_tab()
         self._build_settings_tab()
+        self._refresh_accounts()
 
     def _refresh_accounts(self) -> None:
+        previous_id = self.selected_account_id
+        self.accounts_doc = load_accounts()
         self.account_list.delete(0, tk.END)
-        for account in self.accounts_doc.accounts:
+        selected_index = 0
+        for index, account in enumerate(self.accounts_doc.accounts):
             self.account_list.insert(tk.END, f"{account.label} [{account.credential_status.value}]")
+            if account.id == previous_id:
+                selected_index = index
+        if self.accounts_doc.accounts:
+            self.account_list.selection_set(selected_index)
+            self.selected_account_id = self.accounts_doc.accounts[selected_index].id
+        else:
+            self.selected_account_id = None
+        self._load_selected_account_into_form()
 
     def _add_account(self) -> None:
-        account = create_account("@example", "Example")
+        base = "new-account"
+        existing = {account.handle.lower() for account in self.accounts_doc.accounts}
+        handle = f"@{base}"
+        suffix = 2
+        while handle.lower() in existing:
+            handle = f"@{base}-{suffix}"
+            suffix += 1
+        try:
+            account = create_account(handle, "")
+        except StoreError as exc:
+            messagebox.showerror("Account", str(exc))
+            return
         self.accounts_doc.accounts.append(account)
         save_accounts(self.accounts_doc)
+        self.selected_account_id = account.id
         self._refresh_accounts()
+
+    def _selected_account(self) -> Account | None:
+        if self.selected_account_id is None:
+            return None
+        for account in self.accounts_doc.accounts:
+            if account.id == self.selected_account_id:
+                return account
+        return None
+
+    def _on_account_selected(self, _event: tk.Event[tk.Listbox]) -> None:
+        selection = self.account_list.curselection()  # type: ignore[no-untyped-call]
+        if not selection:
+            return
+        index = selection[0]
+        if index >= len(self.accounts_doc.accounts):
+            return
+        self.selected_account_id = self.accounts_doc.accounts[index].id
+        self._load_selected_account_into_form()
 
     def _build_account_tab(self) -> None:
         tab = self.tabs.tab("Account")
-        ctk.CTkLabel(tab, text="Account metadata and API Credentials").pack(
-            anchor="w",
-            padx=12,
-            pady=12,
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_columnconfigure(1, weight=1)
+
+        metadata = ctk.CTkFrame(tab)
+        metadata.grid(row=0, column=0, sticky="nsew", padx=(12, 6), pady=12)
+        metadata.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(metadata, text="Account").grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(12, 8)
         )
-        ctk.CTkLabel(tab, text="Credential editing is implemented in the storage layer.").pack(
-            anchor="w", padx=12
+        ctk.CTkLabel(metadata, text="Handle").grid(row=1, column=0, sticky="w", padx=12, pady=6)
+        self.handle_var = tk.StringVar()
+        self.handle_entry = ctk.CTkEntry(metadata, textvariable=self.handle_var)
+        self.handle_entry.grid(row=1, column=1, sticky="ew", padx=12, pady=6)
+        ctk.CTkLabel(metadata, text="Display name").grid(
+            row=2, column=0, sticky="w", padx=12, pady=6
         )
+        self.display_name_var = tk.StringVar()
+        self.display_name_entry = ctk.CTkEntry(metadata, textvariable=self.display_name_var)
+        self.display_name_entry.grid(row=2, column=1, sticky="ew", padx=12, pady=6)
+        self.credential_status_label = ctk.CTkLabel(metadata, text="Credentials: -")
+        self.credential_status_label.grid(
+            row=3, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 4)
+        )
+        ctk.CTkButton(metadata, text="Save Account", command=self._save_account_metadata).grid(
+            row=4, column=0, sticky="ew", padx=12, pady=12
+        )
+        ctk.CTkButton(
+            metadata,
+            text="Delete Account",
+            fg_color="#8f1d1d",
+            hover_color="#6f1515",
+            command=self._delete_selected_account,
+        ).grid(row=4, column=1, sticky="ew", padx=12, pady=12)
+
+        credentials = ctk.CTkFrame(tab)
+        credentials.grid(row=0, column=1, sticky="nsew", padx=(6, 12), pady=12)
+        credentials.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(credentials, text="API Credentials").grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(12, 8)
+        )
+        ctk.CTkLabel(credentials, text="API Key").grid(
+            row=1, column=0, sticky="w", padx=12, pady=6
+        )
+        self.consumer_key_var = tk.StringVar()
+        self.consumer_key_entry = ctk.CTkEntry(
+            credentials,
+            textvariable=self.consumer_key_var,
+            show="*",
+            placeholder_text="Leave blank to keep saved value",
+        )
+        self.consumer_key_entry.grid(row=1, column=1, sticky="ew", padx=12, pady=6)
+        ctk.CTkLabel(credentials, text="API Key Secret").grid(
+            row=2, column=0, sticky="w", padx=12, pady=6
+        )
+        self.consumer_secret_var = tk.StringVar()
+        self.consumer_secret_entry = ctk.CTkEntry(
+            credentials,
+            textvariable=self.consumer_secret_var,
+            show="*",
+            placeholder_text="Leave blank to keep saved value",
+        )
+        self.consumer_secret_entry.grid(row=2, column=1, sticky="ew", padx=12, pady=6)
+        ctk.CTkLabel(credentials, text="Bearer Token").grid(
+            row=3, column=0, sticky="w", padx=12, pady=6
+        )
+        self.bearer_token_var = tk.StringVar()
+        self.bearer_token_entry = ctk.CTkEntry(
+            credentials,
+            textvariable=self.bearer_token_var,
+            show="*",
+            placeholder_text="Leave blank to keep saved value",
+        )
+        self.bearer_token_entry.grid(row=3, column=1, sticky="ew", padx=12, pady=6)
+        ctk.CTkButton(credentials, text="Save Credentials", command=self._save_credentials).grid(
+            row=4, column=0, columnspan=2, sticky="ew", padx=12, pady=12
+        )
+        self.account_message = ctk.CTkLabel(credentials, text="", justify="left", wraplength=360)
+        self.account_message.grid(row=5, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 12))
+
+    def _set_account_form_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for widget in (
+            self.handle_entry,
+            self.display_name_entry,
+            self.consumer_key_entry,
+            self.consumer_secret_entry,
+            self.bearer_token_entry,
+        ):
+            widget.configure(state=state)
+
+    def _load_selected_account_into_form(self) -> None:
+        if not hasattr(self, "handle_var"):
+            return
+        account = self._selected_account()
+        if account is None:
+            self.handle_var.set("")
+            self.display_name_var.set("")
+            self.consumer_key_var.set("")
+            self.consumer_secret_var.set("")
+            self.bearer_token_var.set("")
+            self.credential_status_label.configure(text="Credentials: -")
+            self.account_message.configure(text="Add an account to start.")
+            self._set_account_form_enabled(False)
+            return
+        account.credential_status = get_credentials_status(account.id)
+        self.handle_var.set(account.handle)
+        self.display_name_var.set(account.display_name)
+        self.consumer_key_var.set("")
+        self.consumer_secret_var.set("")
+        self.bearer_token_var.set("")
+        self.credential_status_label.configure(
+            text=f"Credentials: {account.credential_status.value}"
+        )
+        if account.credential_status is CredentialStatus.MISSING:
+            message = "No credentials are saved. Enter all three fields before saving."
+        elif account.credential_status is CredentialStatus.INVALID:
+            message = "Saved credentials are invalid. Re-enter all three fields."
+        elif account.credential_status is CredentialStatus.INACCESSIBLE:
+            message = "The OS keychain is not accessible. Credentials cannot be used."
+        else:
+            message = "Saved credentials are available. Blank fields keep existing values."
+        self.account_message.configure(text=message)
+        self._set_account_form_enabled(True)
+
+    def _save_account_metadata(self) -> None:
+        account = self._selected_account()
+        if account is None:
+            messagebox.showwarning("Account", "Select an account first.")
+            return
+        handle = self.handle_var.get().strip()
+        if not handle:
+            messagebox.showwarning("Account", "Handle is required.")
+            return
+        if not handle.startswith("@"):
+            handle = f"@{handle}"
+        normalized = handle.lower()
+        duplicate = any(
+            other.id != account.id and other.handle.lower() == normalized
+            for other in self.accounts_doc.accounts
+        )
+        if duplicate:
+            messagebox.showwarning("Account", f"{handle} is already registered.")
+            return
+        account.handle = handle
+        account.display_name = self.display_name_var.get().strip()
+        save_accounts(self.accounts_doc)
+        self._refresh_accounts()
+        messagebox.showinfo("Account", "Account saved.")
+
+    def _save_credentials(self) -> None:
+        account = self._selected_account()
+        if account is None:
+            messagebox.showwarning("Credentials", "Select an account first.")
+            return
+        account.credential_status = get_credentials_status(account.id)
+        mode: SaveMode = (
+            "create" if account.credential_status is CredentialStatus.MISSING else "update"
+        )
+        try:
+            save_credentials(
+                account.id,
+                {
+                    "consumerKey": self.consumer_key_var.get(),
+                    "consumerSecret": self.consumer_secret_var.get(),
+                    "bearerToken": self.bearer_token_var.get(),
+                },
+                mode=mode,
+            )
+        except StoreError as exc:
+            messagebox.showerror("Credentials", str(exc))
+            self._load_selected_account_into_form()
+            return
+        self._refresh_accounts()
+        messagebox.showinfo("Credentials", "Credentials saved to the OS keychain.")
+
+    def _delete_selected_account(self) -> None:
+        account = self._selected_account()
+        if account is None:
+            messagebox.showwarning("Account", "Select an account first.")
+            return
+        if not messagebox.askyesno("Delete Account", f"Delete {account.label}?"):
+            return
+        result = delete_account(account.id)
+        self.selected_account_id = None
+        self._refresh_accounts()
+        if result.ok:
+            messagebox.showinfo("Account", "Account deleted.")
+        else:
+            messagebox.showwarning("Account", result.message or "Account deleted with warnings.")
 
     def _build_tools_tab(self) -> None:
         tab = self.tabs.tab("Tools")
