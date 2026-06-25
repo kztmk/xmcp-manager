@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - "feature/**"
+  pull_request:
+    branches:
+      - main
+      - develop
+
+jobs:
+  test:
+    name: Lint, type check, and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+
+      - name: Check versions
+        run: python scripts/check_version.py
+
+      - name: Check vendored tool catalog revision
+        run: python scripts/check_tool_catalog_revision.py
+
+      - name: Ruff
+        run: python -m ruff check .
+
+      - name: Mypy
+        run: python -m mypy src/xmcp_manager scripts
+
+      - name: Pytest
+        run: python -m pytest
+
+  pyinstaller-smoke:
+    name: PyInstaller smoke (${{ matrix.os }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: macos
+            artifact-path: "dist/XMCP Manager.app"
+          - os: windows-latest
+            platform: windows
+            artifact-path: "dist/XMCP Manager"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+
+      - name: Build app
+        run: python -m PyInstaller packaging/pyinstaller/xmcp-manager.spec --noconfirm --clean
+
+      - name: Smoke artifact
+        run: python scripts/smoke_artifact.py "${{ matrix.artifact-path }}" --platform "${{ matrix.platform }}"
