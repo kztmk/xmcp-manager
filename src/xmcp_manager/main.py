@@ -5,6 +5,7 @@ from tkinter import messagebox
 
 import customtkinter as ctk
 
+from xmcp_manager import paths
 from xmcp_manager.account_store import (
     SaveMode,
     StoreError,
@@ -18,6 +19,7 @@ from xmcp_manager.account_store import (
 )
 from xmcp_manager.app_settings import AppSettingsError, load_app_settings, save_app_settings
 from xmcp_manager.client_config import (
+    get_client_config_status,
     manual_snippet,
     update_selected_clients,
 )
@@ -528,30 +530,145 @@ class XMCPManagerApp(ctk.CTk):
 
     def _build_clients_tab(self) -> None:
         tab = self.tabs.tab("Clients")
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_columnconfigure(1, weight=1)
+        tab.grid_rowconfigure(2, weight=1)
         self.claude_var = tk.BooleanVar(
             value=McpClientId.CLAUDE_DESKTOP.value in self.settings.selected_mcp_clients
         )
         self.codex_var = tk.BooleanVar(
             value=McpClientId.CODEX_DESKTOP.value in self.settings.selected_mcp_clients
         )
-        ctk.CTkCheckBox(tab, text="Claude Desktop", variable=self.claude_var).pack(
-            anchor="w", padx=12, pady=8
+        controls = ctk.CTkFrame(tab)
+        controls.grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=12)
+        controls.grid_columnconfigure(0, weight=1)
+        controls.grid_columnconfigure(1, weight=1)
+        ctk.CTkButton(
+            controls,
+            text="Refresh Status",
+            command=self._refresh_client_statuses,
+        ).grid(row=0, column=0, sticky="ew", padx=12, pady=12)
+        ctk.CTkButton(
+            controls,
+            text="Update Selected Clients",
+            command=self._update_clients,
+        ).grid(row=0, column=1, sticky="ew", padx=12, pady=12)
+        ctk.CTkCheckBox(tab, text="Claude Desktop", variable=self.claude_var).grid(
+            row=1, column=0, sticky="w", padx=12, pady=(0, 8)
         )
-        ctk.CTkCheckBox(tab, text="Codex Desktop", variable=self.codex_var).pack(
-            anchor="w", padx=12, pady=8
+        ctk.CTkCheckBox(tab, text="Codex Desktop", variable=self.codex_var).grid(
+            row=1, column=1, sticky="w", padx=12, pady=(0, 8)
         )
-        ctk.CTkButton(tab, text="Update MCP client config", command=self._update_clients).pack(
-            anchor="w", padx=12, pady=8
+
+        status_frame = ctk.CTkFrame(tab)
+        status_frame.grid(row=2, column=0, sticky="nsew", padx=(12, 6), pady=(0, 12))
+        status_frame.grid_rowconfigure(0, weight=1)
+        status_frame.grid_columnconfigure(0, weight=1)
+        self.client_status_box = ctk.CTkTextbox(status_frame, height=260)
+        self.client_status_box.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+
+        snippet_frame = ctk.CTkFrame(tab)
+        snippet_frame.grid(row=2, column=1, sticky="nsew", padx=(6, 12), pady=(0, 12))
+        snippet_frame.grid_rowconfigure(1, weight=1)
+        snippet_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkButton(
+            snippet_frame,
+            text="Open Backup Folder",
+            command=self._open_selected_backup_folder,
+        ).grid(row=0, column=0, sticky="ew", padx=12, pady=12)
+        self.snippet_box = ctk.CTkTextbox(snippet_frame, height=260)
+        self.snippet_box.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        self._refresh_client_statuses()
+
+    def _set_textbox(self, textbox: ctk.CTkTextbox, text: str) -> None:
+        textbox.configure(state="normal")
+        textbox.delete("1.0", tk.END)
+        textbox.insert("1.0", text)
+        textbox.configure(state="disabled")
+
+    def _client_status_text(self) -> str:
+        lines = [f"Endpoint: {self.settings.endpoint_url}", ""]
+        for client_id in (McpClientId.CLAUDE_DESKTOP.value, McpClientId.CODEX_DESKTOP.value):
+            status = get_client_config_status(client_id, self.settings.endpoint_url)
+            lines.append(client_id)
+            lines.append(f"  path: {status.config_path}")
+            lines.append(f"  exists: {status.exists}")
+            if status.parse_error:
+                lines.append(f"  parse error: {status.parse_error}")
+            else:
+                lines.append(f"  current url: {status.current_url or '-'}")
+                lines.append(f"  matches: {status.matches}")
+            lines.append("")
+        return "\n".join(lines).rstrip()
+
+    def _manual_snippets_text(self, client_ids: list[str] | None = None) -> str:
+        ids = client_ids or [McpClientId.CLAUDE_DESKTOP.value, McpClientId.CODEX_DESKTOP.value]
+        return "\n\n".join(
+            f"{client_id}:\n{manual_snippet(client_id, self.settings.endpoint_url)}"
+            for client_id in ids
         )
-        snippet = (
-            "Claude Desktop:\n"
-            f"{manual_snippet(McpClientId.CLAUDE_DESKTOP.value, self.settings.endpoint_url)}\n\n"
-            "Codex Desktop:\n"
-            f"{manual_snippet(McpClientId.CODEX_DESKTOP.value, self.settings.endpoint_url)}"
-        )
-        self.snippet_box = ctk.CTkTextbox(tab, height=220)
-        self.snippet_box.pack(fill="both", expand=True, padx=12, pady=8)
-        self.snippet_box.insert("1.0", snippet)
+
+    def _refresh_client_statuses(self) -> None:
+        if not hasattr(self, "client_status_box"):
+            return
+        self._set_textbox(self.client_status_box, self._client_status_text())
+        self._set_textbox(self.snippet_box, self._manual_snippets_text())
+
+    def _open_selected_backup_folder(self) -> None:
+        clients = self._selected_clients()
+        if not clients:
+            messagebox.showwarning("MCP clients", "Select Claude Desktop or Codex Desktop.")
+            return
+        paths.open_folder(paths.get_backup_dir(clients[0]))
+
+    def _parse_error_clients(self, clients: list[str]) -> list[str]:
+        failed = []
+        for client_id in clients:
+            status = get_client_config_status(client_id, self.settings.endpoint_url)
+            if status.parse_error:
+                failed.append(client_id)
+        return failed
+
+    def _confirm_client_overwrites(self, clients: list[str]) -> list[str]:
+        accepted: list[str] = []
+        changed_settings = False
+        for client_id in clients:
+            status = get_client_config_status(client_id, self.settings.endpoint_url)
+            if status.parse_error:
+                continue
+            current_url = status.current_url
+            if current_url and current_url != self.settings.endpoint_url:
+                accepted_url = self.settings.client_overwrite_accepted_urls.get(client_id)
+                if accepted_url != current_url:
+                    if not messagebox.askyesno(
+                        "MCP clients",
+                        (
+                            f"{client_id} already points to {current_url}. "
+                            f"Replace it with {self.settings.endpoint_url}?"
+                        ),
+                    ):
+                        continue
+                    self.settings.client_overwrite_accepted_urls[client_id] = current_url
+                    changed_settings = True
+            accepted.append(client_id)
+        if changed_settings:
+            save_app_settings(self.settings)
+        return accepted
+
+    def _update_client_result_text(self, selected: list[str], updated: list[str]) -> str:
+        lines = []
+        parse_errors = self._parse_error_clients(selected)
+        for client_id in parse_errors:
+            status = get_client_config_status(client_id, self.settings.endpoint_url)
+            lines.append(f"{client_id}: parse error, manual update required: {status.parse_error}")
+        skipped = [client_id for client_id in selected if client_id not in updated + parse_errors]
+        for client_id in skipped:
+            lines.append(f"{client_id}: skipped.")
+        if lines:
+            lines.append("")
+        lines.append("Manual snippets:")
+        lines.append(self._manual_snippets_text(parse_errors or selected))
+        return "\n".join(lines)
 
     def _selected_clients(self) -> list[str]:
         clients: list[str] = []
@@ -566,10 +683,28 @@ class XMCPManagerApp(ctk.CTk):
         if not clients:
             messagebox.showwarning("MCP clients", "Select Claude Desktop or Codex Desktop.")
             return
+        accepted_clients = self._confirm_client_overwrites(clients)
         self.settings.selected_mcp_clients = clients
         save_app_settings(self.settings)
-        result = update_selected_clients(clients, self.settings.endpoint_url)
+        if not accepted_clients:
+            self._refresh_client_statuses()
+            self._set_textbox(self.snippet_box, self._update_client_result_text(clients, []))
+            return
+        result = update_selected_clients(accepted_clients, self.settings.endpoint_url)
         message = "\n".join(f"{item.client_id}: {item.message}" for item in result.results)
+        failed_snippets = [
+            item.manual_snippet
+            for item in result.results
+            if not item.ok and item.manual_snippet is not None
+        ]
+        self._refresh_client_statuses()
+        result_text = [message, ""]
+        if failed_snippets:
+            result_text.append("Manual update required:")
+            result_text.extend(failed_snippets)
+        else:
+            result_text.append(self._update_client_result_text(clients, accepted_clients))
+        self._set_textbox(self.snippet_box, "\n".join(result_text))
         if result.ok:
             messagebox.showinfo("MCP clients", message)
         else:
