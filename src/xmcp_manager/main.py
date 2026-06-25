@@ -33,6 +33,12 @@ from xmcp_manager.models import (
     utc_now_iso,
 )
 from xmcp_manager.server_manager import ServerManager
+from xmcp_manager.store_validation import (
+    format_store_validation,
+    is_store_build,
+    run_store_validation,
+    validation_is_current,
+)
 from xmcp_manager.tool_allowlist import (
     generate_allowlist,
     load_tool_catalog,
@@ -808,12 +814,48 @@ class XMCPManagerApp(ctk.CTk):
 
     def _build_settings_tab(self) -> None:
         tab = self.tabs.tab("Settings")
-        ctk.CTkLabel(tab, text=f"MCP endpoint: {self.settings.endpoint_url}").pack(
-            anchor="w", padx=12, pady=12
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(3, weight=1)
+        ctk.CTkLabel(tab, text=f"MCP endpoint: {self.settings.endpoint_url}").grid(
+            row=0, column=0, sticky="w", padx=12, pady=(12, 6)
         )
-        ctk.CTkLabel(tab, text=f"OAuth Callback URI: {self.settings.callback_uri}").pack(
-            anchor="w", padx=12
+        ctk.CTkLabel(tab, text=f"OAuth Callback URI: {self.settings.callback_uri}").grid(
+            row=1, column=0, sticky="w", padx=12, pady=6
         )
+        store_text = (
+            f"Store build: {is_store_build()}   "
+            f"Validation current: {validation_is_current(self.settings)}"
+        )
+        self.store_validation_summary = ctk.CTkLabel(tab, text=store_text)
+        self.store_validation_summary.grid(row=2, column=0, sticky="w", padx=12, pady=6)
+        self.store_validation_box = ctk.CTkTextbox(tab, height=220)
+        self.store_validation_box.grid(row=3, column=0, sticky="nsew", padx=12, pady=8)
+        ctk.CTkButton(
+            tab,
+            text="Run Store Validation",
+            command=self._run_store_validation,
+        ).grid(row=4, column=0, sticky="ew", padx=12, pady=(0, 12))
+        self._refresh_store_validation_view()
+
+    def _refresh_store_validation_view(self) -> None:
+        if not hasattr(self, "store_validation_box"):
+            return
+        self.store_validation_summary.configure(
+            text=(
+                f"Store build: {is_store_build()}   "
+                f"Validation current: {validation_is_current(self.settings)}"
+            )
+        )
+        self._set_textbox(
+            self.store_validation_box,
+            format_store_validation(self.settings.store_validation),
+        )
+
+    def _run_store_validation(self) -> None:
+        self.settings.store_validation = run_store_validation(self.settings)
+        save_app_settings(self.settings)
+        self._refresh_store_validation_view()
+        messagebox.showinfo("Store Validation", "Store validation completed.")
 
     def _on_server_state(self, snapshot: ServerStateSnapshot) -> None:
         self.header.configure(
